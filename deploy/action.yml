@@ -274,10 +274,21 @@ runs:
       shell: bash
       run: kill "${{ steps.server.outputs.server-pid }}" 2>/dev/null || true
 
+    - name: Compute log artifact name
+      if: always()
+      id: log-artifact
+      shell: bash
+      env:
+        RELEASE_TAG: ${{ inputs.github-release-tag }}
+      run: |
+        set -euo pipefail
+        tag=$(printf '%s' "$RELEASE_TAG" | tr -cs 'A-Za-z0-9._-' '-')
+        echo "name=static-nix-cache-deploy-log-${tag}-${GITHUB_RUN_ATTEMPT}-${RANDOM}" >> "$GITHUB_OUTPUT"
+
     - name: Upload server logs
       if: always()
       uses: actions/upload-artifact@v4
       with:
-        name: static-nix-cache-deploy-log
+        name: ${{ steps.log-artifact.outputs.name }}
         path: /tmp/static-nix-cache-deploy.log
         retention-days: 7
