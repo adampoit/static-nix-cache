@@ -278,6 +278,6 @@ runs:
       if: always()
       uses: actions/upload-artifact@v4
       with:
-        name: static-nix-cache-deploy-log
+        name: static-nix-cache-deploy-log-${{ inputs.github-release-tag }}
         path: /tmp/static-nix-cache-deploy.log
         retention-days: 7
