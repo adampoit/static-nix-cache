@@ -11,9 +11,10 @@ const path = require('path');
  * (Cloudflare Pages, GitHub Pages, Netlify, etc.) and will serve as a
  * Nix binary cache substituter.
  *
- * NAR binary files are expected to be hosted on GitHub Releases. The
- * generated site includes a `_redirects` file (Cloudflare Pages compatible)
- * that redirects `/nar/*` requests to the GitHub Release download URLs.
+ * NAR binary files are expected to be hosted on GitHub Releases. Narinfo
+ * entries are rewritten to point directly at those release download URLs so
+ * the generated cache works on static hosts that do not support redirects.
+ * The generated site also includes a `_redirects` file for hosts that do.
  *
  * @param {object} options
  * @param {string} options.narinfoDirPath   - path to the directory containing narinfo files
@@ -55,14 +56,14 @@ async function generateStaticSite(options) {
   }
 
   const narinfoFiles = entries.filter(f => f.endsWith('.narinfo'));
+  const narBaseUrl = `https://github.com/${githubOwner}/${githubRepo}/releases/download/${encodeURIComponent(githubReleaseTag)}`;
   for (const filename of narinfoFiles) {
     const content = await fsp.readFile(path.join(narinfoDir, filename), 'utf8');
-    await fsp.writeFile(path.join(outputDir, filename), content, 'utf8');
+    const rewritten = content.replace(/^URL:\s*nar\/(.+)$/m, (_, nar) => `URL: ${narBaseUrl}/${nar}`);
+    await fsp.writeFile(path.join(outputDir, filename), rewritten, 'utf8');
   }
 
-  // 3. Generate _redirects file for Cloudflare Pages
-  // This redirects NAR download requests to GitHub Releases
-  const narBaseUrl = `https://github.com/${githubOwner}/${githubRepo}/releases/download/${encodeURIComponent(githubReleaseTag)}`;
+  // 3. Generate _redirects file for static hosts that support it
   const redirects = `/nar/:filename ${narBaseUrl}/:filename 302\n`;
   await fsp.writeFile(path.join(outputDir, '_redirects'), redirects, 'utf8');
 
