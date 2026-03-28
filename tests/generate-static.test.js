@@ -44,7 +44,7 @@ describe('generateStaticSite', () => {
     expect(result.narinfoCount).toBe(0);
   });
 
-  test('copies narinfo files to output directory', async () => {
+  test('rewrites narinfo URLs to GitHub release downloads', async () => {
     const narinfo1 = 'StorePath: /nix/store/abc-pkg\nNarHash: sha256:abc\nNarSize: 100\nURL: nar/abc.nar.xz\n';
     const narinfo2 = 'StorePath: /nix/store/def-pkg\nNarHash: sha256:def\nNarSize: 200\nURL: nar/def.nar.xz\n';
     await fsp.writeFile(path.join(narinfoDir, 'abc.narinfo'), narinfo1);
@@ -61,10 +61,26 @@ describe('generateStaticSite', () => {
     expect(result.narinfoCount).toBe(2);
 
     const out1 = await fsp.readFile(path.join(outputDir, 'abc.narinfo'), 'utf8');
-    expect(out1).toBe(narinfo1);
+    expect(out1).toContain('URL: https://github.com/testowner/testrepo/releases/download/nix-cache/abc.nar.xz');
 
     const out2 = await fsp.readFile(path.join(outputDir, 'def.narinfo'), 'utf8');
-    expect(out2).toBe(narinfo2);
+    expect(out2).toContain('URL: https://github.com/testowner/testrepo/releases/download/nix-cache/def.nar.xz');
+  });
+
+  test('leaves narinfo without URL lines unchanged', async () => {
+    const narinfo = 'StorePath: /nix/store/ghi-pkg\nNarHash: sha256:ghi\nNarSize: 300\n';
+    await fsp.writeFile(path.join(narinfoDir, 'ghi.narinfo'), narinfo);
+
+    await generateStaticSite({
+      narinfoDirPath: narinfoDir,
+      outputDir,
+      githubOwner: 'testowner',
+      githubRepo: 'testrepo',
+      githubReleaseTag: 'nix-cache',
+    });
+
+    const out = await fsp.readFile(path.join(outputDir, 'ghi.narinfo'), 'utf8');
+    expect(out).toBe(narinfo);
   });
 
   test('generates _redirects file for Cloudflare Pages', async () => {
