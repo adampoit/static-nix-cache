@@ -55,14 +55,15 @@ async function generateStaticSite(options) {
   }
 
   const narinfoFiles = entries.filter(f => f.endsWith('.narinfo'));
+  const narBaseUrl = `https://github.com/${githubOwner}/${githubRepo}/releases/download/${encodeURIComponent(githubReleaseTag)}`;
   for (const filename of narinfoFiles) {
     const content = await fsp.readFile(path.join(narinfoDir, filename), 'utf8');
-    await fsp.writeFile(path.join(outputDir, filename), content, 'utf8');
+    const rewritten = content.replace(/^URL:\s*nar\/(.+)$/m, (_, nar) => `URL: ${narBaseUrl}/${nar}`);
+    await fsp.writeFile(path.join(outputDir, filename), rewritten, 'utf8');
   }
 
   // 3. Generate _redirects file for Cloudflare Pages
   // This redirects NAR download requests to GitHub Releases
-  const narBaseUrl = `https://github.com/${githubOwner}/${githubRepo}/releases/download/${encodeURIComponent(githubReleaseTag)}`;
   const redirects = `/nar/:filename ${narBaseUrl}/:filename 302\n`;
   await fsp.writeFile(path.join(outputDir, '_redirects'), redirects, 'utf8');
 
