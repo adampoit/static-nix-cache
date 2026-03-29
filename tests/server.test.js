@@ -27,6 +27,12 @@ class MemoryStorage {
   }
 }
 
+class RedirectStorage extends MemoryStorage {
+  narDownloadUrl(filename) {
+    return `https://example.com/releases/${filename}`;
+  }
+}
+
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 function makeApp(overrides = {}) {
@@ -155,5 +161,14 @@ describe('NAR endpoints', () => {
     });
     expect(res.status).toBe(200);
     expect(res.body).toEqual(narData);
+  });
+
+  test('GET /nar/:filename redirects when storage exposes public URLs', async () => {
+    const storage = new RedirectStorage();
+    const app = createApp({ _storage: storage });
+
+    const res = await request(app).get(`/nar/${filename}`).redirects(0);
+    expect(res.status).toBe(302);
+    expect(res.headers.location).toBe(`https://example.com/releases/${filename}`);
   });
 });
