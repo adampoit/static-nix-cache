@@ -22,6 +22,10 @@ const { signNarinfo } = require('../signing');
 function createCacheRouter(storage, config) {
   const router = express.Router();
   const authMiddleware = requireUploadSecret(config.uploadSecret);
+  const fail = (msg, err, res) => {
+    console.error(`[static-nix-cache] ${msg}:`, err?.stack || err?.message || err);
+    res.sendStatus(500);
+  };
 
   // ---------------------------------------------------------------------------
   // GET /nix-cache-info
@@ -43,7 +47,7 @@ function createCacheRouter(storage, config) {
       const exists = await storage.hasNarinfo(req.params.hash);
       res.sendStatus(exists ? 200 : 404);
     } catch (err) {
-      res.sendStatus(500);
+      fail(`HEAD /${req.params.hash}.narinfo`, err, res);
     }
   });
 
@@ -59,7 +63,7 @@ function createCacheRouter(storage, config) {
       res.type('text/x-nix-narinfo');
       res.send(content);
     } catch (err) {
-      res.sendStatus(500);
+      fail(`GET /${req.params.hash}.narinfo`, err, res);
     }
   });
 
@@ -80,7 +84,7 @@ function createCacheRouter(storage, config) {
       await storage.putNarinfo(req.params.hash, content);
       res.sendStatus(200);
     } catch (err) {
-      res.sendStatus(500);
+      fail(`PUT /${req.params.hash}.narinfo`, err, res);
     }
   });
 
@@ -89,6 +93,10 @@ function createCacheRouter(storage, config) {
   // ---------------------------------------------------------------------------
   router.get('/nar/:filename', async (req, res) => {
     try {
+      if (typeof storage.narDownloadUrl === 'function') {
+        return res.redirect(302, storage.narDownloadUrl(req.params.filename));
+      }
+
       const narStream = await storage.getNarStream(req.params.filename);
       if (narStream === null) {
         return res.sendStatus(404);
@@ -97,7 +105,7 @@ function createCacheRouter(storage, config) {
       narStream.pipe(res);
       narStream.on('error', () => res.destroy());
     } catch (err) {
-      res.sendStatus(500);
+      fail(`GET /nar/${req.params.filename}`, err, res);
     }
   });
 
@@ -109,7 +117,7 @@ function createCacheRouter(storage, config) {
       await storage.putNarStream(req.params.filename, req);
       res.sendStatus(200);
     } catch (err) {
-      res.sendStatus(500);
+      fail(`PUT /nar/${req.params.filename}`, err, res);
     }
   });
 

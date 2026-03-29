@@ -8,6 +8,7 @@ const { promisify } = require('util');
 
 const pipeline = promisify(stream.pipeline);
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
+const RETRYABLE = new Set([408, 409, 423, 425, 429, 500, 502, 503, 504]);
 
 /**
  * GitHub Releases storage backend.
@@ -27,6 +28,10 @@ class GitHubReleasesStorage {
     this.releaseTag = releaseTag;
     this.localPath = localPath;
     this._releaseId = null;
+    this._releasePromise = null;
+    this._assets = null;
+    this._assetPromise = null;
+    this._assetMap = null;
 
     // Ensure local narinfo directory exists
     fs.mkdirSync(path.join(this.localPath, 'narinfo'), { recursive: true });
@@ -35,58 +40,220 @@ class GitHubReleasesStorage {
   /**
    * Get or create the GitHub Release and return its ID.
    */
-  async _getReleaseId() {
-    if (this._releaseId) return this._releaseId;
+  async _getReleaseId(force = false) {
+    if (this._releaseId && !force) return this._releaseId;
+    if (this._releasePromise && !force) return this._releasePromise;
 
-    // Try to get existing release by tag
-    const getUrl = `https://api.github.com/repos/${this.owner}/${this.repo}/releases/tags/${encodeURIComponent(this.releaseTag)}`;
-    console.log(`[github-releases] Looking up release by tag: ${this.releaseTag}`);
-    const getResp = await fetch(getUrl, {
-      headers: this._headers(),
-    });
+    this._releasePromise = (async () => {
+      const getUrl = `https://api.github.com/repos/${this.owner}/${this.repo}/releases/tags/${encodeURIComponent(this.releaseTag)}`;
+      console.log(`[github-releases] Looking up release by tag: ${this.releaseTag}`);
 
-    if (getResp.ok) {
-      const release = await getResp.json();
+      const getResp = await this._request(getUrl, {
+        headers: this._headers(),
+      }, { allow: [404], retries: 6 });
+
+      if (getResp.status !== 404) {
+        const release = await getResp.json();
+        this._releaseId = release.id;
+        console.log(`[github-releases] Found existing release id=${this._releaseId}`);
+        return this._releaseId;
+      }
+
+      console.log('[github-releases] Release not found, creating new release');
+
+      const createResp = await this._request(`https://api.github.com/repos/${this.owner}/${this.repo}/releases`, {
+        method: 'POST',
+        headers: { ...this._headers(), 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          tag_name: this.releaseTag,
+          name: `Nix Binary Cache (${this.releaseTag})`,
+          body: 'Nix binary cache NAR files managed by static-nix-cache.',
+          draft: false,
+          prerelease: false,
+        }),
+      }, { allow: [422], retries: 6 });
+
+      if (createResp.status === 422) {
+        console.warn('[github-releases] Release create returned 422, refetching existing release');
+        const retryResp = await this._request(getUrl, {
+          headers: this._headers(),
+        }, { retries: 6 });
+        const release = await retryResp.json();
+        this._releaseId = release.id;
+        return this._releaseId;
+      }
+
+      const release = await createResp.json();
       this._releaseId = release.id;
-      console.log(`[github-releases] Found existing release id=${this._releaseId}`);
+      console.log(`[github-releases] Created release id=${this._releaseId}`);
       return this._releaseId;
+    })();
+
+    try {
+      return await this._releasePromise;
+    } finally {
+      this._releasePromise = null;
     }
-
-    console.log(`[github-releases] Release not found (${getResp.status}), creating new release`);
-
-    // Create release if it doesn't exist
-    const createUrl = `https://api.github.com/repos/${this.owner}/${this.repo}/releases`;
-    const createResp = await fetch(createUrl, {
-      method: 'POST',
-      headers: { ...this._headers(), 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        tag_name: this.releaseTag,
-        name: `Nix Binary Cache (${this.releaseTag})`,
-        body: 'Nix binary cache NAR files managed by static-nix-cache.',
-        draft: false,
-        prerelease: false,
-      }),
-    });
-
-    if (!createResp.ok) {
-      const errBody = await createResp.text();
-      console.error(`[github-releases] Failed to create release: ${createResp.status} ${errBody}`);
-      throw new Error(`Failed to create GitHub release: ${createResp.status} ${errBody}`);
-    }
-
-    const release = await createResp.json();
-    this._releaseId = release.id;
-    console.log(`[github-releases] Created release id=${this._releaseId}`);
-    return this._releaseId;
   }
 
-  _headers() {
+  _headers(accept = 'application/vnd.github.v3+json') {
     return {
       Authorization: `token ${this.token}`,
-      Accept: 'application/vnd.github.v3+json',
+      Accept: accept,
       'User-Agent': 'static-nix-cache',
       'X-GitHub-Api-Version': '2022-11-28',
     };
+  }
+
+  _isRetryable(resp, body) {
+    if (RETRYABLE.has(resp.status)) return true;
+    if (resp.status !== 403) return false;
+    if (resp.headers.get('x-ratelimit-remaining') === '0') return true;
+    return /rate limit/i.test(body);
+  }
+
+  _delay(resp, attempt, body) {
+    const retryAfter = Number.parseInt(resp.headers.get('retry-after') || '', 10);
+    if (Number.isFinite(retryAfter) && retryAfter > 0) return retryAfter * 1000;
+
+    if (this._isRetryable(resp, body)) {
+      const reset = Number.parseInt(resp.headers.get('x-ratelimit-reset') || '', 10);
+      if (Number.isFinite(reset) && reset > 0) {
+        return Math.max(1000, Math.min(reset * 1000 - Date.now() + 1000, 5 * 60 * 1000));
+      }
+    }
+
+    return Math.min(30000, 1000 * 2 ** attempt);
+  }
+
+  async _wait(ms) {
+    await new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  async _request(url, options, { allow = [], retries = 5 } = {}) {
+    const method = options?.method || 'GET';
+    const allowed = new Set(allow);
+
+    for (let attempt = 0; attempt < retries; attempt++) {
+      let resp;
+      try {
+        resp = await fetch(url, options);
+      } catch (err) {
+        if (attempt + 1 >= retries) throw err;
+        const delay = Math.min(30000, 1000 * 2 ** attempt);
+        console.warn(`[github-releases] ${method} ${url} errored (${err.message}), retrying in ${Math.ceil(delay / 1000)}s`);
+        await this._wait(delay);
+        continue;
+      }
+
+      if (resp.ok || allowed.has(resp.status)) return resp;
+
+      const body = await resp.text();
+      if (attempt + 1 < retries && this._isRetryable(resp, body)) {
+        const delay = this._delay(resp, attempt, body);
+        console.warn(`[github-releases] ${method} ${url} failed (${resp.status}), retrying in ${Math.ceil(delay / 1000)}s`);
+        await this._wait(delay);
+        continue;
+      }
+
+      throw new Error(`${method} ${url} failed: ${resp.status} ${body}`);
+    }
+  }
+
+  _setAssets(assets) {
+    this._assets = assets;
+    this._assetMap = new Map(assets.map(asset => [asset.name, asset]));
+  }
+
+  _upsertAsset(asset) {
+    if (!this._assets || !this._assetMap) {
+      this._setAssets([asset]);
+      return;
+    }
+
+    const index = this._assets.findIndex(item => item.name === asset.name);
+    if (index === -1) this._assets.push(asset);
+    else this._assets[index] = asset;
+    this._assetMap.set(asset.name, asset);
+  }
+
+  _dropAsset(name) {
+    if (!this._assets || !this._assetMap) return;
+    this._assets = this._assets.filter(asset => asset.name !== name);
+    this._assetMap.delete(name);
+  }
+
+  async _deleteAsset(asset) {
+    console.log(`[github-releases] Deleting existing asset ${asset.name} (id=${asset.id})`);
+    await this._request(
+      `https://api.github.com/repos/${this.owner}/${this.repo}/releases/assets/${asset.id}`,
+      { method: 'DELETE', headers: this._headers() },
+      { allow: [404], retries: 6 }
+    );
+    this._dropAsset(asset.name);
+  }
+
+  async _uploadAsset(filename, body, contentType, warn = false) {
+    const releaseId = await this._getReleaseId();
+    const existing = await this._findAsset(filename);
+    if (existing) await this._deleteAsset(existing);
+
+    const uploadUrl = `https://uploads.github.com/repos/${this.owner}/${this.repo}/releases/${releaseId}/assets?name=${encodeURIComponent(filename)}`;
+
+    for (let attempt = 0; attempt < 6; attempt++) {
+      let resp;
+      try {
+        resp = await fetch(uploadUrl, {
+          method: 'POST',
+          headers: {
+            ...this._headers(),
+            'Content-Type': contentType,
+            'Content-Length': String(body.length),
+          },
+          body,
+        });
+      } catch (err) {
+        if (attempt + 1 >= 6) {
+          if (warn) {
+            console.warn(`[github-releases] Upload ${filename} failed: ${err.message}`);
+            return null;
+          }
+          throw err;
+        }
+
+        const delay = Math.min(30000, 1000 * 2 ** attempt);
+        console.warn(`[github-releases] Upload ${filename} errored (${err.message}), retrying in ${Math.ceil(delay / 1000)}s`);
+        await this._wait(delay);
+        const stale = await this._findAsset(filename, true);
+        if (stale) await this._deleteAsset(stale);
+        continue;
+      }
+
+      if (resp.ok) {
+        const asset = await resp.json();
+        this._upsertAsset(asset);
+        console.log(`[github-releases] Uploaded asset ${filename} successfully`);
+        return asset;
+      }
+
+      const bodyText = await resp.text();
+      if (resp.status === 422 && /already exists/i.test(bodyText) && attempt + 1 < 6) {
+        console.warn(`[github-releases] Asset ${filename} already exists, refreshing cache before retry`);
+        const stale = await this._findAsset(filename, true);
+        if (stale) await this._deleteAsset(stale);
+      } else if (attempt + 1 >= 6 || !this._isRetryable(resp, bodyText)) {
+        const message = `[github-releases] Failed to upload asset ${filename}: ${resp.status} ${bodyText}`;
+        if (warn) {
+          console.warn(message);
+          return null;
+        }
+        throw new Error(message);
+      }
+
+      const delay = this._delay(resp, attempt, bodyText);
+      console.warn(`[github-releases] Upload ${filename} failed (${resp.status}), retrying in ${Math.ceil(delay / 1000)}s`);
+      await this._wait(delay);
+    }
   }
 
   // ── narinfo (local filesystem) ──────────────────────────────────────────────
@@ -125,33 +292,7 @@ class GitHubReleasesStorage {
     // Also persist to GitHub Releases so other jobs (e.g. matrix builds) and
     // future static site generations can discover all narinfo across runs.
     const filename = `${hash}.narinfo`;
-    const releaseId = await this._getReleaseId();
-    const body = Buffer.from(content, 'utf8');
-
-    // Delete existing asset with the same name if present
-    const existing = await this._findAsset(filename);
-    if (existing) {
-      await fetch(
-        `https://api.github.com/repos/${this.owner}/${this.repo}/releases/assets/${existing.id}`,
-        { method: 'DELETE', headers: this._headers() }
-      );
-    }
-
-    const uploadUrl = `https://uploads.github.com/repos/${this.owner}/${this.repo}/releases/${releaseId}/assets?name=${encodeURIComponent(filename)}`;
-    const resp = await fetch(uploadUrl, {
-      method: 'POST',
-      headers: {
-        ...this._headers(),
-        'Content-Type': 'text/plain',
-        'Content-Length': String(body.length),
-      },
-      body,
-    });
-
-    if (!resp.ok) {
-      const errBody = await resp.text();
-      console.warn(`[github-releases] Warning: failed to upload narinfo asset ${filename}: ${resp.status} ${errBody}`);
-    }
+    await this._uploadAsset(filename, Buffer.from(content, 'utf8'), 'text/plain', true);
   }
 
   /**
@@ -175,16 +316,13 @@ class GitHubReleasesStorage {
       // Skip if we already have this file locally (just written by this job)
       if (await this._exists(localFile)) continue;
 
-      const resp = await fetch(asset.url, {
-        headers: {
-          ...this._headers(),
-          Accept: 'application/octet-stream',
-        },
+      const resp = await this._request(asset.url, {
+        headers: this._headers('application/octet-stream'),
         redirect: 'follow',
-      });
+      }, { allow: [404], retries: 6 });
 
-      if (!resp.ok) {
-        console.warn(`[github-releases] Warning: could not download narinfo asset ${asset.name}: ${resp.status}`);
+      if (resp.status === 404) {
+        console.warn(`[github-releases] Warning: could not download narinfo asset ${asset.name}: 404`);
         continue;
       }
 
@@ -208,23 +346,18 @@ class GitHubReleasesStorage {
     const asset = await this._findAsset(filename);
     if (!asset) return null;
 
-    const resp = await fetch(asset.url, {
-      headers: {
-        ...this._headers(),
-        Accept: 'application/octet-stream',
-      },
+    const resp = await this._request(asset.url, {
+      headers: this._headers('application/octet-stream'),
       redirect: 'follow',
-    });
+    }, { allow: [404], retries: 6 });
 
-    if (!resp.ok) return null;
+    if (resp.status === 404) return null;
 
     const { Readable } = require('stream');
     return Readable.fromWeb(resp.body);
   }
 
   async putNarStream(filename, readableStream) {
-    const releaseId = await this._getReleaseId();
-
     // Collect stream into buffer for upload.
     // Note: GitHub's upload API requires Content-Length, so the full NAR
     // must be buffered.  For very large NARs consider using S3 storage.
@@ -235,35 +368,7 @@ class GitHubReleasesStorage {
     const body = Buffer.concat(chunks);
 
     console.log(`[github-releases] Uploading NAR asset ${filename} (${body.length} bytes)`);
-
-    // Delete existing asset with the same name if present
-    const existing = await this._findAsset(filename);
-    if (existing) {
-      console.log(`[github-releases] Deleting existing asset ${filename} (id=${existing.id})`);
-      await fetch(
-        `https://api.github.com/repos/${this.owner}/${this.repo}/releases/assets/${existing.id}`,
-        { method: 'DELETE', headers: this._headers() }
-      );
-    }
-
-    const uploadUrl = `https://uploads.github.com/repos/${this.owner}/${this.repo}/releases/${releaseId}/assets?name=${encodeURIComponent(filename)}`;
-    const resp = await fetch(uploadUrl, {
-      method: 'POST',
-      headers: {
-        ...this._headers(),
-        'Content-Type': 'application/octet-stream',
-        'Content-Length': String(body.length),
-      },
-      body,
-    });
-
-    if (!resp.ok) {
-      const errBody = await resp.text();
-      console.error(`[github-releases] Failed to upload asset ${filename}: ${resp.status} ${errBody}`);
-      throw new Error(`Failed to upload release asset: ${resp.status} ${errBody}`);
-    }
-
-    console.log(`[github-releases] Uploaded asset ${filename} successfully`);
+    await this._uploadAsset(filename, body, 'application/octet-stream');
   }
 
   /**
@@ -271,51 +376,50 @@ class GitHubReleasesStorage {
    * @param {string} filename
    * @returns {Promise<object|null>}
    */
-  async _findAsset(filename) {
-    const releaseId = await this._getReleaseId();
-    let page = 1;
+  async _findAsset(filename, force = false) {
+    const cached = Boolean(this._assets) && !force;
+    await this._listAllAssets(force);
+    const asset = this._assetMap?.get(filename) || null;
+    if (asset || force || !cached) return asset;
 
-    while (true) {
-      const url = `https://api.github.com/repos/${this.owner}/${this.repo}/releases/${releaseId}/assets?per_page=100&page=${page}`;
-      const resp = await fetch(url, { headers: this._headers() });
-
-      if (!resp.ok) return null;
-
-      const assets = await resp.json();
-      if (assets.length === 0) return null;
-
-      const match = assets.find(a => a.name === filename);
-      if (match) return match;
-
-      if (assets.length < 100) return null;
-      page++;
-    }
+    await this._listAllAssets(true);
+    return this._assetMap?.get(filename) || null;
   }
 
   /**
    * List all release assets (paginates through all pages).
    * @returns {Promise<object[]>}
    */
-  async _listAllAssets() {
-    const releaseId = await this._getReleaseId();
-    const all = [];
-    let page = 1;
+  async _listAllAssets(force = false) {
+    if (this._assets && !force) return this._assets;
+    if (this._assetPromise && !force) return this._assetPromise;
 
-    while (true) {
-      const url = `https://api.github.com/repos/${this.owner}/${this.repo}/releases/${releaseId}/assets?per_page=100&page=${page}`;
-      const resp = await fetch(url, { headers: this._headers() });
+    this._assetPromise = (async () => {
+      const releaseId = await this._getReleaseId();
+      const all = [];
+      let page = 1;
 
-      if (!resp.ok) break;
+      while (true) {
+        const url = `https://api.github.com/repos/${this.owner}/${this.repo}/releases/${releaseId}/assets?per_page=100&page=${page}`;
+        const resp = await this._request(url, { headers: this._headers() }, { retries: 6 });
 
-      const assets = await resp.json();
-      if (assets.length === 0) break;
+        const assets = await resp.json();
+        if (assets.length === 0) break;
 
-      all.push(...assets);
-      if (assets.length < 100) break;
-      page++;
+        all.push(...assets);
+        if (assets.length < 100) break;
+        page++;
+      }
+
+      this._setAssets(all);
+      return this._assets;
+    })();
+
+    try {
+      return await this._assetPromise;
+    } finally {
+      this._assetPromise = null;
     }
-
-    return all;
   }
 
   /**
@@ -404,16 +508,11 @@ class GitHubReleasesStorage {
         }
       }
 
-      console.log(`[github-releases] Deleting orphaned asset ${asset.name} (id=${asset.id})`);
-      const resp = await fetch(
-        `https://api.github.com/repos/${this.owner}/${this.repo}/releases/assets/${asset.id}`,
-        { method: 'DELETE', headers: this._headers() }
-      );
-
-      if (resp.ok) {
+      try {
+        await this._deleteAsset(asset);
         deleted.push(asset.name);
-      } else {
-        console.error(`[github-releases] Failed to delete asset ${asset.name}: ${resp.status}`);
+      } catch (err) {
+        console.error(`[github-releases] Failed to delete asset ${asset.name}: ${err.message}`);
         kept.push(asset.name);
       }
     }
