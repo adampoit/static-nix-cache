@@ -6,6 +6,9 @@ inputs:
     description: 'Unique name for this artifact (e.g. linux-x86_64). Used as a suffix for the artifact name.'
     required: false
     default: 'default'
+  paths-file:
+    description: 'Path to a file containing explicit store paths to export. When set, auto-detection is skipped.'
+    required: false
   signing-key:
     description: 'Nix signing key (keyname:base64-ed25519-private). If provided, exported binaries will be signed.'
     required: false
@@ -26,6 +29,7 @@ runs:
       shell: bash
       env:
         ARTIFACT_NAME: ${{ inputs.name }}
+        INPUT_PATHS_FILE: ${{ inputs.paths-file }}
         SNAPSHOT_PATH: ${{ inputs.snapshot-path }}
         STORE_DIR: ${{ inputs.store-dir }}
       run: |
@@ -33,7 +37,14 @@ runs:
         EXPORT_DIR="/tmp/static-nix-cache-save/${ARTIFACT_NAME}"
         mkdir -p "$EXPORT_DIR"
 
-        if [ -f "$SNAPSHOT_PATH" ]; then
+        if [ -n "$INPUT_PATHS_FILE" ]; then
+          if [ ! -f "$INPUT_PATHS_FILE" ]; then
+            echo "::error::paths-file not found: $INPUT_PATHS_FILE"
+            exit 1
+          fi
+
+          cp "$INPUT_PATHS_FILE" "$EXPORT_DIR/store-paths.txt"
+        elif [ -f "$SNAPSHOT_PATH" ]; then
           # Auto-detect new paths by diffing the store against the setup snapshot
           echo "Auto-detecting new store paths..."
           CURRENT_PATHS=$(mktemp)
@@ -58,10 +69,12 @@ runs:
               -cnewer "$MNC_PID_FILE" \
               | sort > "$EXPORT_DIR/store-paths.txt"
           else
-            echo "::error::Either 'paths' input, a store snapshot from the setup action, or MAGIC_NIX_CACHE_DAEMONDIR is required"
+            echo "::error::Either paths-file, a store snapshot from the setup action, or MAGIC_NIX_CACHE_DAEMONDIR is required"
             exit 1
           fi
         fi
+
+        sort -u -o "$EXPORT_DIR/store-paths.txt" "$EXPORT_DIR/store-paths.txt"
 
         count=$(wc -l < "$EXPORT_DIR/store-paths.txt")
         echo "Exporting $count store path(s)..."
