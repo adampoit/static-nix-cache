@@ -241,16 +241,17 @@ runs:
         set -euo pipefail
         PATHS_FILE="${{ steps.prepare.outputs.paths-file }}"
 
-        copy_args=()
-        if [ -n "$EXPORT_DIR" ] && [ -d "$EXPORT_DIR" ]; then
-          copy_args+=(--from "file://$EXPORT_DIR")
-          echo "Copying from exported binary cache: $EXPORT_DIR"
-        fi
-
         while IFS= read -r p; do
           [ -z "$p" ] && continue
           echo "Pushing: $p"
-          nix copy "${copy_args[@]}" --to "http://localhost:${PORT}?compression=${COMPRESSION}" --no-check-sigs "$p"
+
+          if [ -n "$EXPORT_DIR" ] && [ -d "$EXPORT_DIR" ]; then
+            echo "Copying from exported binary cache: $EXPORT_DIR"
+            nix copy --from "file://$EXPORT_DIR" --to "http://localhost:${PORT}?compression=${COMPRESSION}" --no-check-sigs "$p"
+            continue
+          fi
+
+          nix copy --to "http://localhost:${PORT}?compression=${COMPRESSION}" --no-check-sigs "$p"
         done < "$PATHS_FILE"
 
     - name: Generate static site
