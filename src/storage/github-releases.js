@@ -105,6 +105,39 @@ class GitHubReleasesStorage {
     };
   }
 
+  _interestingHeaders(resp) {
+    const getHeader = name => resp.headers?.get?.(name) ?? null;
+    return {
+      'x-github-request-id': getHeader('x-github-request-id'),
+      'x-ratelimit-limit': getHeader('x-ratelimit-limit'),
+      'x-ratelimit-remaining': getHeader('x-ratelimit-remaining'),
+      'x-ratelimit-reset': getHeader('x-ratelimit-reset'),
+      'retry-after': getHeader('retry-after'),
+      'content-type': getHeader('content-type'),
+    };
+  }
+
+  _formatHeaders(resp) {
+    return Object.entries(this._interestingHeaders(resp))
+      .filter(([, value]) => value !== null && value !== '')
+      .map(([name, value]) => `${name}=${JSON.stringify(value)}`)
+      .join(', ');
+  }
+
+  _truncateBody(body) {
+    if (!body) return '';
+    return body.length > 1000 ? `${body.slice(0, 1000)}...` : body;
+  }
+
+  _formatFailureDetails(resp, body) {
+    const headers = this._formatHeaders(resp);
+    const bodyText = this._truncateBody(body);
+    const parts = [];
+    if (headers) parts.push(`headers={${headers}}`);
+    if (bodyText) parts.push(`body=${JSON.stringify(bodyText)}`);
+    return parts.length > 0 ? ` ${parts.join(' ')}` : '';
+  }
+
   _isRetryable(resp, body) {
     if (RETRYABLE.has(resp.status)) return true;
     if (resp.status !== 403) return false;
@@ -149,14 +182,17 @@ class GitHubReleasesStorage {
       if (resp.ok || allowed.has(resp.status)) return resp;
 
       const body = await resp.text();
+      const details = this._formatFailureDetails(resp, body);
       if (attempt + 1 < retries && this._isRetryable(resp, body)) {
         const delay = this._delay(resp, attempt, body);
-        console.warn(`[github-releases] ${method} ${url} failed (${resp.status}), retrying in ${Math.ceil(delay / 1000)}s`);
+        console.warn(
+          `[github-releases] ${method} ${url} failed (${resp.status})${details}, retrying in ${Math.ceil(delay / 1000)}s`
+        );
         await this._wait(delay);
         continue;
       }
 
-      throw new Error(`${method} ${url} failed: ${resp.status} ${body}`);
+      throw new Error(`${method} ${url} failed: ${resp.status}${details}`);
     }
   }
 
@@ -237,12 +273,13 @@ class GitHubReleasesStorage {
       }
 
       const bodyText = await resp.text();
+      const details = this._formatFailureDetails(resp, bodyText);
       if (resp.status === 422 && /already exists/i.test(bodyText) && attempt + 1 < 6) {
         console.warn(`[github-releases] Asset ${filename} already exists, refreshing cache before retry`);
         const stale = await this._findAsset(filename, true);
         if (stale) await this._deleteAsset(stale);
       } else if (attempt + 1 >= 6 || !this._isRetryable(resp, bodyText)) {
-        const message = `[github-releases] Failed to upload asset ${filename}: ${resp.status} ${bodyText}`;
+        const message = `[github-releases] Failed to upload asset ${filename}: ${resp.status}${details}`;
         if (warn) {
           console.warn(message);
           return null;
@@ -251,7 +288,9 @@ class GitHubReleasesStorage {
       }
 
       const delay = this._delay(resp, attempt, bodyText);
-      console.warn(`[github-releases] Upload ${filename} failed (${resp.status}), retrying in ${Math.ceil(delay / 1000)}s`);
+      console.warn(
+        `[github-releases] Upload ${filename} failed (${resp.status})${details}, retrying in ${Math.ceil(delay / 1000)}s`
+      );
       await this._wait(delay);
     }
   }

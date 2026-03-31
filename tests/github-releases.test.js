@@ -18,6 +18,7 @@ function makeTempDir() {
 describe('GitHubReleasesStorage', () => {
   let tmpDir;
   let storage;
+  let consoleWarnSpy;
 
   const releaseResponse = { id: 42, tag_name: 'nix-cache' };
 
@@ -31,9 +32,11 @@ describe('GitHubReleasesStorage', () => {
       localPath: tmpDir,
     });
     mockFetch.mockReset();
+    consoleWarnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
   });
 
   afterEach(() => {
+    consoleWarnSpy.mockRestore();
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 
@@ -174,6 +177,43 @@ describe('GitHubReleasesStorage', () => {
     expect(createCall[1].method).toBe('POST');
     const body = JSON.parse(createCall[1].body);
     expect(body.tag_name).toBe('nix-cache');
+  });
+
+  test('release lookup error includes GitHub headers and body details', async () => {
+    storage._wait = jest.fn().mockResolvedValue();
+
+    for (let i = 0; i < 6; i++) {
+      mockFetch.mockResolvedValueOnce({
+        ok: false,
+        status: 403,
+        statusText: 'Forbidden',
+        text: async () => JSON.stringify({ message: 'Resource not accessible by integration' }),
+        headers: {
+          get(name) {
+            const values = {
+              'x-github-request-id': 'REQ123',
+              'x-ratelimit-remaining': '0',
+              'retry-after': '300',
+              'content-type': 'application/json; charset=utf-8',
+            };
+            return values[name.toLowerCase()] ?? null;
+          },
+        },
+      });
+    }
+
+    await expect(storage.hasNar('test.nar')).rejects.toThrow(
+      'GET https://api.github.com/repos/testowner/testrepo/releases/tags/nix-cache failed: 403'
+    );
+    expect(consoleWarnSpy).toHaveBeenCalledWith(
+      expect.stringContaining('x-ratelimit-remaining="0"')
+    );
+    expect(consoleWarnSpy).toHaveBeenCalledWith(
+      expect.stringContaining('retry-after="300"')
+    );
+    expect(consoleWarnSpy).toHaveBeenCalledWith(
+      expect.stringContaining('Resource not accessible by integration')
+    );
   });
 
   test('narDownloadUrl returns correct public URL', () => {
