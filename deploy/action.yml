@@ -258,6 +258,7 @@ runs:
       if: inputs.static != ''
       shell: bash
       env:
+        STORAGE_BACKEND: ${{ inputs.backend }}
         GITHUB_OWNER: ${{ inputs.github-owner }}
         GITHUB_REPO: ${{ inputs.github-repo }}
         GITHUB_RELEASE_TAG: ${{ inputs.github-release-tag }}
