@@ -1,59 +1,59 @@
-name: 'static-nix-cache Deploy'
-description: 'Deploy Nix store paths to an static-nix-cache instance'
+name: "static-nix-cache Deploy"
+description: "Deploy Nix store paths to an static-nix-cache instance"
 
 inputs:
   paths-file:
-    description: 'Path to a file containing store paths to deploy. When omitted, paths are auto-detected from the setup snapshot, restored artifacts, or a running magic-nix-cache daemon.'
+    description: "Path to a file containing store paths to deploy. When omitted, paths are auto-detected from the setup snapshot, restored artifacts, or a running magic-nix-cache daemon."
     required: false
   export-dir:
-    description: 'Path to a nix binary cache export directory. When set, paths are copied from this store instead of the local nix store.'
+    description: "Path to a nix binary cache export directory. When set, paths are copied from this store instead of the local nix store."
     required: false
   snapshot-path:
-    description: 'Path to the store snapshot file from the setup action. When the file exists (and paths-file is omitted), new store paths are auto-detected by diffing the nix store.'
+    description: "Path to the store snapshot file from the setup action. When the file exists (and paths-file is omitted), new store paths are auto-detected by diffing the nix store."
     required: false
-    default: '/tmp/static-nix-cache-setup/store-paths-before.txt'
+    default: "/tmp/static-nix-cache-setup/store-paths-before.txt"
   store-dir:
-    description: 'Path to the Nix store directory (used for auto-detection)'
+    description: "Path to the Nix store directory (used for auto-detection)"
     required: false
-    default: '/nix/store'
+    default: "/nix/store"
   artifact-pattern:
-    description: 'Artifact name pattern for auto-restore (default: static-nix-cache-*). Used when no paths-file or snapshot is available.'
+    description: "Artifact name pattern for auto-restore (default: static-nix-cache-*). Used when no paths-file or snapshot is available."
     required: false
-    default: 'static-nix-cache-*'
+    default: "static-nix-cache-*"
   backend:
-    description: 'Storage backend: github-releases, s3, or local'
+    description: "Storage backend: github-releases, s3, or local"
     required: false
-    default: 'github-releases'
+    default: "github-releases"
   github-token:
-    description: 'GitHub token (required for github-releases backend)'
+    description: "GitHub token (required for github-releases backend)"
     required: false
   github-owner:
-    description: 'GitHub repository owner (defaults to current repository owner)'
+    description: "GitHub repository owner (defaults to current repository owner)"
     required: false
   github-repo:
-    description: 'GitHub repository name (defaults to current repository name)'
+    description: "GitHub repository name (defaults to current repository name)"
     required: false
   github-release-tag:
-    description: 'GitHub release tag for NAR storage'
+    description: "GitHub release tag for NAR storage"
     required: false
-    default: 'nix-cache'
+    default: "nix-cache"
   signing-key:
-    description: 'Nix signing key (keyname:base64-ed25519-private)'
+    description: "Nix signing key (keyname:base64-ed25519-private)"
     required: false
   upload-secret:
-    description: 'Bearer token for upload authentication'
+    description: "Bearer token for upload authentication"
     required: false
   static:
-    description: 'Output directory for static site generation (omit to skip)'
+    description: "Output directory for static site generation (omit to skip)"
     required: false
   port:
-    description: 'Port for the temporary static-nix-cache server'
+    description: "Port for the temporary static-nix-cache server"
     required: false
-    default: '18734'
+    default: "18734"
   compression:
-    description: 'Compression type for nix copy (none, xz, zstd)'
+    description: "Compression type for nix copy (none, xz, zstd)"
     required: false
-    default: 'none'
+    default: "none"
 
 runs:
   using: composite
@@ -237,9 +237,50 @@ runs:
         EXPORT_DIR: ${{ inputs.export-dir || steps.aggregate.outputs.export-dir }}
         PORT: ${{ inputs.port }}
         COMPRESSION: ${{ inputs.compression }}
+        SIGNING_KEY: ${{ inputs.signing-key }}
+        UPLOAD_SECRET: ${{ inputs.upload-secret }}
       run: |
         set -euo pipefail
         PATHS_FILE="${{ steps.prepare.outputs.paths-file }}"
+
+        if [ -n "$EXPORT_DIR" ] && [ -d "$EXPORT_DIR" ] && [ -n "$SIGNING_KEY" ]; then
+          KEY_FILE=$(mktemp)
+          chmod 600 "$KEY_FILE"
+          printf '%s' "$SIGNING_KEY" > "$KEY_FILE"
+          trap 'rm -f "$KEY_FILE"' EXIT
+
+          PUBLIC_KEY=$(nix key convert-secret-to-public < "$KEY_FILE")
+          MARKER_URL="http://localhost:${PORT}/static-nix-cache-signing-public-key"
+          CURRENT_PUBLIC_KEY=$(curl -fsS "$MARKER_URL" 2>/dev/null || true)
+
+          if [ "$CURRENT_PUBLIC_KEY" = "$PUBLIC_KEY" ]; then
+            echo "Signing key marker is current; skipping metadata refresh."
+          else
+            echo "Signing key marker changed; refreshing exported binary cache metadata..."
+            while IFS= read -r p; do
+              [ -z "$p" ] && continue
+              nix store sign --store "file://$EXPORT_DIR/nix-cache" --key-file "$KEY_FILE" --recursive "$p"
+            done < "$PATHS_FILE"
+
+            echo "Publishing signed narinfo metadata..."
+            find "$EXPORT_DIR/nix-cache" -maxdepth 1 -name '*.narinfo' -type f | while IFS= read -r narinfo; do
+              hash=$(basename "$narinfo" .narinfo)
+              curl_args=(-fsS -X PUT --data-binary "@$narinfo" -H 'Content-Type: text/x-nix-narinfo')
+              if [ -n "$UPLOAD_SECRET" ]; then
+                curl_args+=(-H "Authorization: Bearer $UPLOAD_SECRET")
+              fi
+
+              curl "${curl_args[@]}" \
+                "http://localhost:${PORT}/${hash}.narinfo" > /dev/null
+            done
+
+            marker_args=(-fsS -X PUT --data-binary "$PUBLIC_KEY" -H 'Content-Type: text/plain')
+            if [ -n "$UPLOAD_SECRET" ]; then
+              marker_args+=(-H "Authorization: Bearer $UPLOAD_SECRET")
+            fi
+            curl "${marker_args[@]}" "$MARKER_URL" > /dev/null
+          fi
+        fi
 
         while IFS= read -r p; do
           [ -z "$p" ] && continue

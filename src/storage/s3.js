@@ -2,6 +2,7 @@
 
 const { Readable } = require('stream');
 const { S3Client, GetObjectCommand, PutObjectCommand, HeadObjectCommand } = require('@aws-sdk/client-s3');
+const SIGNING_PUBLIC_KEY_MARKER = 'static-nix-cache-signing-public-key';
 
 /**
  * S3-compatible storage backend.
@@ -62,6 +63,32 @@ class S3Storage {
       Key: `narinfo/${hash}.narinfo`,
       Body: content,
       ContentType: 'text/x-nix-narinfo',
+    }));
+  }
+
+  async getSigningPublicKey() {
+    try {
+      const resp = await this.client.send(new GetObjectCommand({
+        Bucket: this.bucket,
+        Key: SIGNING_PUBLIC_KEY_MARKER,
+      }));
+      const chunks = [];
+      for await (const chunk of resp.Body) {
+        chunks.push(chunk);
+      }
+      return Buffer.concat(chunks).toString('utf8');
+    } catch (err) {
+      if (err.name === 'NoSuchKey' || err.$metadata?.httpStatusCode === 404) return null;
+      throw err;
+    }
+  }
+
+  async putSigningPublicKey(content) {
+    await this.client.send(new PutObjectCommand({
+      Bucket: this.bucket,
+      Key: SIGNING_PUBLIC_KEY_MARKER,
+      Body: content,
+      ContentType: 'text/plain',
     }));
   }
 

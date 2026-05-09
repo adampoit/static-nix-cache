@@ -15,6 +15,8 @@ class MemoryStorage {
   async hasNarinfo(hash) { return this.narinfos.has(hash); }
   async getNarinfo(hash) { return this.narinfos.get(hash) ?? null; }
   async putNarinfo(hash, content) { this.narinfos.set(hash, content); }
+  async getSigningPublicKey() { return this.signingPublicKey ?? null; }
+  async putSigningPublicKey(content) { this.signingPublicKey = content; }
   async hasNar(filename) { return this.nars.has(filename); }
   async getNarStream(filename) {
     if (!this.nars.has(filename)) return null;
@@ -125,6 +127,36 @@ describe('narinfo endpoints', () => {
 
     const res = await request(app).get(`/${hash}.narinfo`);
     expect(res.text).toMatch(/^Sig: test-1:/m);
+  });
+});
+
+describe('signing public key marker endpoints', () => {
+  test('GET returns 404 when marker is missing', async () => {
+    const app = makeApp();
+    await request(app).get('/static-nix-cache-signing-public-key').expect(404);
+  });
+
+  test('PUT requires auth when secret is set', async () => {
+    const app = makeApp({ uploadSecret: 'secret123' });
+    await request(app)
+      .put('/static-nix-cache-signing-public-key')
+      .set('Content-Type', 'text/plain')
+      .send('cache-1:abc123')
+      .expect(401);
+  });
+
+  test('PUT then GET round-trips marker', async () => {
+    const app = makeApp({ uploadSecret: 'secret123' });
+    await request(app)
+      .put('/static-nix-cache-signing-public-key')
+      .set('Authorization', 'Bearer secret123')
+      .set('Content-Type', 'text/plain')
+      .send('cache-1:abc123')
+      .expect(200);
+
+    const res = await request(app).get('/static-nix-cache-signing-public-key');
+    expect(res.status).toBe(200);
+    expect(res.text).toBe('cache-1:abc123\n');
   });
 });
 

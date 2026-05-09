@@ -42,6 +42,16 @@ describe('LocalStorage', () => {
     expect(await storage.getNarinfo('deadbeef')).toBe(content);
   });
 
+  test('putSigningPublicKey and getSigningPublicKey round-trip', async () => {
+    const publicKey = 'cache-1:abc123\n';
+    await storage.putSigningPublicKey(publicKey);
+    expect(await storage.getSigningPublicKey()).toBe(publicKey);
+  });
+
+  test('getSigningPublicKey returns null when marker is missing', async () => {
+    expect(await storage.getSigningPublicKey()).toBeNull();
+  });
+
   test('getNarinfo returns null for missing entry', async () => {
     expect(await storage.getNarinfo('missing')).toBeNull();
   });

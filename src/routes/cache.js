@@ -40,6 +40,45 @@ function createCacheRouter(storage, config) {
   });
 
   // ---------------------------------------------------------------------------
+  // GET/PUT /static-nix-cache-signing-public-key - cache signing-key marker
+  // ---------------------------------------------------------------------------
+  router.get('/static-nix-cache-signing-public-key', async (req, res) => {
+    try {
+      if (typeof storage.getSigningPublicKey !== 'function') {
+        return res.sendStatus(404);
+      }
+
+      const content = await storage.getSigningPublicKey();
+      if (content === null) {
+        return res.sendStatus(404);
+      }
+
+      res.type('text/plain');
+      res.send(content);
+    } catch (err) {
+      fail('GET /static-nix-cache-signing-public-key', err, res);
+    }
+  });
+
+  router.put('/static-nix-cache-signing-public-key', authMiddleware, express.text({ type: '*/*', limit: '1kb' }), async (req, res) => {
+    try {
+      if (typeof storage.putSigningPublicKey !== 'function') {
+        return res.sendStatus(404);
+      }
+
+      const content = typeof req.body === 'string' ? req.body.trim() : '';
+      if (!content) {
+        return res.status(400).json({ error: 'Empty body' });
+      }
+
+      await storage.putSigningPublicKey(`${content}\n`);
+      res.sendStatus(200);
+    } catch (err) {
+      fail('PUT /static-nix-cache-signing-public-key', err, res);
+    }
+  });
+
+  // ---------------------------------------------------------------------------
   // HEAD /:hash.narinfo  – used by Nix to check cache presence
   // ---------------------------------------------------------------------------
   router.head('/:hash.narinfo', async (req, res) => {

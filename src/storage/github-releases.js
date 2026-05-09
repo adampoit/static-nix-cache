@@ -9,6 +9,7 @@ const { promisify } = require('util');
 const pipeline = promisify(stream.pipeline);
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
 const RETRYABLE = new Set([408, 409, 423, 425, 429, 500, 502, 503, 504]);
+const SIGNING_PUBLIC_KEY_MARKER = 'static-nix-cache-signing-public-key';
 
 /**
  * GitHub Releases storage backend.
@@ -332,6 +333,23 @@ class GitHubReleasesStorage {
     // future static site generations can discover all narinfo across runs.
     const filename = `${hash}.narinfo`;
     await this._uploadAsset(filename, Buffer.from(content, 'utf8'), 'text/plain', true);
+  }
+
+  async getSigningPublicKey() {
+    const asset = await this._findAsset(SIGNING_PUBLIC_KEY_MARKER);
+    if (!asset) return null;
+
+    const resp = await this._request(asset.url, {
+      headers: this._headers('application/octet-stream'),
+      redirect: 'follow',
+    }, { allow: [404], retries: 6 });
+
+    if (resp.status === 404) return null;
+    return resp.text();
+  }
+
+  async putSigningPublicKey(content) {
+    await this._uploadAsset(SIGNING_PUBLIC_KEY_MARKER, Buffer.from(content, 'utf8'), 'text/plain');
   }
 
   /**

@@ -7,6 +7,7 @@ const stream = require('stream');
 const { promisify } = require('util');
 
 const pipeline = promisify(stream.pipeline);
+const SIGNING_PUBLIC_KEY_MARKER = 'static-nix-cache-signing-public-key';
 
 /**
  * Local filesystem storage backend.
@@ -50,6 +51,18 @@ class LocalStorage {
 
   async putNarinfo(hash, content) {
     await fsp.writeFile(path.join(this.root, 'narinfo', `${hash}.narinfo`), content, 'utf8');
+  }
+
+  async getSigningPublicKey() {
+    try {
+      return await fsp.readFile(path.join(this.root, SIGNING_PUBLIC_KEY_MARKER), 'utf8');
+    } catch {
+      return null;
+    }
+  }
+
+  async putSigningPublicKey(content) {
+    await fsp.writeFile(path.join(this.root, SIGNING_PUBLIC_KEY_MARKER), content, 'utf8');
   }
 
   async hasNar(filename) {

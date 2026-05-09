@@ -91,6 +91,39 @@ describe('GitHubReleasesStorage', () => {
     expect(await storage.getNarinfo('missing')).toBeNull();
   });
 
+  test('putSigningPublicKey uploads marker asset', async () => {
+    mockFetch
+      // _getReleaseId
+      .mockResolvedValueOnce({ ok: true, json: async () => releaseResponse })
+      // _findAsset: no existing
+      .mockResolvedValueOnce({ ok: true, json: async () => [] })
+      // Upload marker
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ id: 12, name: 'static-nix-cache-signing-public-key' }) });
+
+    await storage.putSigningPublicKey('cache-1:abc123\n');
+
+    expect(mockFetch).toHaveBeenCalledTimes(3);
+    const uploadCall = mockFetch.mock.calls[2];
+    expect(uploadCall[0]).toContain('name=static-nix-cache-signing-public-key');
+    expect(uploadCall[1].headers['Content-Type']).toBe('text/plain');
+    expect(uploadCall[1].body.toString()).toBe('cache-1:abc123\n');
+  });
+
+  test('getSigningPublicKey downloads marker asset', async () => {
+    mockFetch
+      // _getReleaseId
+      .mockResolvedValueOnce({ ok: true, json: async () => releaseResponse })
+      // _findAsset: marker exists
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => [{ name: 'static-nix-cache-signing-public-key', id: 12, url: 'https://api.github.com/marker' }],
+      })
+      // Download marker
+      .mockResolvedValueOnce({ ok: true, status: 200, text: async () => 'cache-1:abc123\n' });
+
+    await expect(storage.getSigningPublicKey()).resolves.toBe('cache-1:abc123\n');
+  });
+
   // ── NAR (GitHub Releases) ─────────────────────────────────────────────────
 
   test('hasNar returns false when asset not found', async () => {
