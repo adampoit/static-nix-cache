@@ -99,7 +99,8 @@ runs:
         UPLOAD_SECRET: ${{ inputs.upload-secret }}
         PORT: ${{ inputs.port }}
         COMPRESSION: ${{ inputs.compression }}
-        STATIC_NIX_CACHE_DIR: ${{ steps.install.outputs.static-nix-cache-dir }}
+        STATIC_OUTPUT: ${{ inputs.static }}
+        STATIC_NIX_CACHE_DIR: ${{ github.action_path }}/..
       run: |
         set -euo pipefail
 
@@ -215,18 +216,32 @@ runs:
           done < "$paths_file"
         }
 
+        has_restored_artifacts=false
+        if [ -d /tmp/static-nix-cache-restore ] && find /tmp/static-nix-cache-restore -mindepth 1 -maxdepth 1 | grep -q .; then
+          has_restored_artifacts=true
+        fi
+
+        if [ -n "$STATIC_OUTPUT" ] && [ -n "$GITHUB_RELEASE_TAGS" ] && [ -z "$INPUT_PATHS_FILE" ] && [ ! -f "$SNAPSHOT_PATH" ] && [ "$has_restored_artifacts" = false ]; then
+          echo "No deployable paths found; skipping deploy and generating static site from github-release-tags."
+          exit 0
+        fi
+
         # ── Determine mode ────────────────────────────────────────────────────────
-        if [ -n "$GITHUB_RELEASE_TAGS" ] && [ -z "$INPUT_PATHS_FILE" ] && [ -d /tmp/static-nix-cache-restore ]; then
+        if [ -n "$GITHUB_RELEASE_TAGS" ] && [ -z "$INPUT_PATHS_FILE" ] && [ "$has_restored_artifacts" = true ]; then
           # Multi-release mode: one release per matching artifact
           IFS=',' read -ra TAGS <<< "$GITHUB_RELEASE_TAGS"
 
           for tag in "${TAGS[@]}"; do
             tag=$(echo "$tag" | xargs)  # trim
-            suffix="${tag##*-}"
+            suffix="${tag#nix-cache-}"
             artifact_dir="/tmp/static-nix-cache-restore/static-nix-cache-${suffix}"
+            if [ ! -d "$artifact_dir" ] && [[ "$suffix" == *-* ]]; then
+              platform="${suffix%%-*}"
+              artifact_dir="/tmp/static-nix-cache-restore/static-nix-cache-${platform}/${suffix}"
+            fi
 
             if [ ! -d "$artifact_dir" ]; then
-              echo "Warning: No artifact found for release tag '$tag' (looked in $artifact_dir)"
+              echo "Warning: No artifact found for release tag '$tag' (looked for static-nix-cache-${suffix})"
               continue
             fi
 
@@ -273,7 +288,7 @@ runs:
         GITHUB_RELEASE_TAGS: ${{ inputs.github-release-tags }}
         GITHUB_TOKEN: ${{ inputs.github-token }}
         OUTPUT_DIR: ${{ inputs.static }}
-        STATIC_NIX_CACHE_DIR: ${{ steps.install.outputs.static-nix-cache-dir }}
+        STATIC_NIX_CACHE_DIR: ${{ github.action_path }}/..
       run: |
         set -euo pipefail
         export GITHUB_OWNER="${GITHUB_OWNER:-${{ github.repository_owner }}}"

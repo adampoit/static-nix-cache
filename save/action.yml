@@ -1,25 +1,28 @@
-name: 'static-nix-cache Save'
-description: 'Export new Nix store paths as a workflow artifact for later deployment with the deploy action'
+name: "static-nix-cache Save"
+description: "Export new Nix store paths as a workflow artifact for later deployment with the deploy action"
 
 inputs:
   name:
-    description: 'Unique name for this artifact (e.g. linux-x86_64). Used as a suffix for the artifact name.'
+    description: "Unique name for this artifact (e.g. linux-x86_64). Used as a suffix for the artifact name."
     required: false
-    default: 'default'
+    default: "default"
   paths-file:
-    description: 'Path to a file containing explicit store paths to export. When set, auto-detection is skipped.'
+    description: "Path to a file containing explicit store paths to export. When set, auto-detection is skipped."
+    required: false
+  paths-dir:
+    description: "Directory containing one *.txt paths file per cache artifact to export. Each file is uploaded as static-nix-cache-<name>-<basename>."
     required: false
   signing-key:
-    description: 'Nix signing key (keyname:base64-ed25519-private). If provided, exported binaries will be signed.'
+    description: "Nix signing key (keyname:base64-ed25519-private). If provided, exported binaries will be signed."
     required: false
   snapshot-path:
-    description: 'Path to the store snapshot file from the setup action (used for auto-detection)'
+    description: "Path to the store snapshot file from the setup action (used for auto-detection)"
     required: false
-    default: '/tmp/static-nix-cache-setup/store-paths-before.txt'
+    default: "/tmp/static-nix-cache-setup/store-paths-before.txt"
   store-dir:
-    description: 'Path to the Nix store directory (used for auto-detection)'
+    description: "Path to the Nix store directory (used for auto-detection)"
     required: false
-    default: '/nix/store'
+    default: "/nix/store"
 
 runs:
   using: composite
@@ -30,12 +33,52 @@ runs:
       env:
         ARTIFACT_NAME: ${{ inputs.name }}
         INPUT_PATHS_FILE: ${{ inputs.paths-file }}
+        INPUT_PATHS_DIR: ${{ inputs.paths-dir }}
         SNAPSHOT_PATH: ${{ inputs.snapshot-path }}
         STORE_DIR: ${{ inputs.store-dir }}
       run: |
         set -euo pipefail
-        EXPORT_DIR="/tmp/static-nix-cache-save/${ARTIFACT_NAME}"
+        EXPORT_ROOT="/tmp/static-nix-cache-save"
+        EXPORT_DIR="$EXPORT_ROOT/${ARTIFACT_NAME}"
         mkdir -p "$EXPORT_DIR"
+
+        export_one() {
+          local paths_file="$1"
+          local export_dir="$2"
+
+          mkdir -p "$export_dir/nix-cache"
+          if [ "$paths_file" != "$export_dir/store-paths.txt" ]; then
+            cp "$paths_file" "$export_dir/store-paths.txt"
+          fi
+          sort -u -o "$export_dir/store-paths.txt" "$export_dir/store-paths.txt"
+
+          local count
+          count=$(wc -l < "$export_dir/store-paths.txt")
+          echo "Exporting $count store path(s) to $export_dir..."
+
+          while IFS= read -r p; do
+            [ -z "$p" ] && continue
+            echo "  $p"
+            nix copy --to "file://$export_dir/nix-cache" "$p" --no-check-sigs
+          done < "$export_dir/store-paths.txt"
+        }
+
+        if [ -n "$INPUT_PATHS_DIR" ]; then
+          shopt -s nullglob
+          paths_files=("$INPUT_PATHS_DIR"/*.txt)
+          if [ "${#paths_files[@]}" -eq 0 ]; then
+            echo "::error::paths-dir contains no *.txt files: $INPUT_PATHS_DIR"
+            exit 1
+          fi
+
+          for paths_file in "${paths_files[@]}"; do
+            artifact_suffix=$(basename "$paths_file" .txt)
+            export_one "$paths_file" "$EXPORT_ROOT/${ARTIFACT_NAME}-${artifact_suffix}"
+          done
+
+          echo "export-dir=$EXPORT_ROOT" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
 
         if [ -n "$INPUT_PATHS_FILE" ]; then
           if [ ! -f "$INPUT_PATHS_FILE" ]; then
@@ -74,17 +117,7 @@ runs:
           fi
         fi
 
-        sort -u -o "$EXPORT_DIR/store-paths.txt" "$EXPORT_DIR/store-paths.txt"
-
-        count=$(wc -l < "$EXPORT_DIR/store-paths.txt")
-        echo "Exporting $count store path(s)..."
-
-        # Export each path (and its closure) to a local binary cache
-        while IFS= read -r p; do
-          [ -z "$p" ] && continue
-          echo "  $p"
-          nix copy --to "file://$EXPORT_DIR/nix-cache" "$p" --no-check-sigs
-        done < "$EXPORT_DIR/store-paths.txt"
+        export_one "$EXPORT_DIR/store-paths.txt" "$EXPORT_DIR"
 
         echo "export-dir=$EXPORT_DIR" >> "$GITHUB_OUTPUT"
 
@@ -102,9 +135,13 @@ runs:
         trap 'rm -f "$KEY_FILE"' EXIT
 
         echo "Signing exported store paths..."
-        while IFS= read -r p; do
-          nix store sign --store "file://$EXPORT_DIR/nix-cache" --key-file "$KEY_FILE" --recursive "$p"
-        done < "$EXPORT_DIR/store-paths.txt"
+        find "$EXPORT_DIR" -name store-paths.txt -print0 | while IFS= read -r -d '' paths_file; do
+          cache_dir=$(dirname "$paths_file")
+          while IFS= read -r p; do
+            [ -z "$p" ] && continue
+            nix store sign --store "file://$cache_dir/nix-cache" --key-file "$KEY_FILE" --recursive "$p"
+          done < "$paths_file"
+        done
         echo "Signing complete"
 
     - name: Upload artifact
