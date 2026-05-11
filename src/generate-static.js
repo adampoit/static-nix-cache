@@ -16,6 +16,11 @@ const path = require('path');
  * the generated cache works on static hosts that do not support redirects.
  * The generated site also includes a `_redirects` file for hosts that do.
  *
+ * When `narReleaseMap` is provided, each narinfo's `URL:` is rewritten to
+ * point at the specific release tag that owns the NAR file. This allows a
+ * single static cache to aggregate NARs spread across many per-package or
+ * per-platform releases.
+ *
  * @param {object} options
  * @param {string} options.narinfoDirPath   - path to the directory containing narinfo files
  * @param {string} options.outputDir        - directory to write generated static files
@@ -23,7 +28,8 @@ const path = require('path');
  * @param {number} options.priority         - cache priority (default: 30)
  * @param {string} options.githubOwner      - GitHub repo owner
  * @param {string} options.githubRepo       - GitHub repo name
- * @param {string} options.githubReleaseTag - GitHub release tag name
+ * @param {string} options.githubReleaseTag - default GitHub release tag name (fallback)
+ * @param {Map<string,string>} [options.narReleaseMap] - map of NAR filename to release tag
  */
 async function generateStaticSite(options) {
   const {
@@ -34,6 +40,7 @@ async function generateStaticSite(options) {
     githubOwner,
     githubRepo,
     githubReleaseTag,
+    narReleaseMap,
   } = options;
 
   // Create output directory
@@ -56,21 +63,26 @@ async function generateStaticSite(options) {
   }
 
   const narinfoFiles = entries.filter(f => f.endsWith('.narinfo'));
-  const narBaseUrl = `https://github.com/${githubOwner}/${githubRepo}/releases/download/${encodeURIComponent(githubReleaseTag)}`;
+  const defaultNarBaseUrl = `https://github.com/${githubOwner}/${githubRepo}/releases/download/${encodeURIComponent(githubReleaseTag)}`;
+
   for (const filename of narinfoFiles) {
     const content = await fsp.readFile(path.join(narinfoDir, filename), 'utf8');
-    const rewritten = content.replace(/^URL:\s*nar\/(.+)$/m, (_, nar) => `URL: ${narBaseUrl}/${nar}`);
+    const rewritten = content.replace(/^URL:\s*nar\/(.+)$/m, (_, nar) => {
+      const tag = narReleaseMap?.get(nar) || githubReleaseTag;
+      const baseUrl = `https://github.com/${githubOwner}/${githubRepo}/releases/download/${encodeURIComponent(tag)}`;
+      return `URL: ${baseUrl}/${nar}`;
+    });
     await fsp.writeFile(path.join(outputDir, filename), rewritten, 'utf8');
   }
 
   // 3. Generate _redirects file for static hosts that support it
-  const redirects = `/nar/:filename ${narBaseUrl}/:filename 302\n`;
+  const redirects = `/nar/:filename ${defaultNarBaseUrl}/:filename 302\n`;
   await fsp.writeFile(path.join(outputDir, '_redirects'), redirects, 'utf8');
 
   return {
     narinfoCount: narinfoFiles.length,
     outputDir,
-    narBaseUrl,
+    narBaseUrl: defaultNarBaseUrl,
   };
 }
 

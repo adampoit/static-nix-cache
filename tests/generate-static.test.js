@@ -139,4 +139,75 @@ describe('generateStaticSite', () => {
     expect(fs.existsSync(path.join(outputDir, 'nix-cache-info'))).toBe(true);
     expect(fs.existsSync(path.join(outputDir, '_redirects'))).toBe(true);
   });
+
+  test('rewrites narinfo URLs using narReleaseMap when provided', async () => {
+    const narinfo1 = 'StorePath: /nix/store/abc-pkg\nNarHash: sha256:abc\nNarSize: 100\nURL: nar/abc.nar.xz\n';
+    const narinfo2 = 'StorePath: /nix/store/def-pkg\nNarHash: sha256:def\nNarSize: 200\nURL: nar/def.nar.xz\n';
+    await fsp.writeFile(path.join(narinfoDir, 'abc.narinfo'), narinfo1);
+    await fsp.writeFile(path.join(narinfoDir, 'def.narinfo'), narinfo2);
+
+    const narReleaseMap = new Map([
+      ['abc.nar.xz', 'nix-cache-foo'],
+      ['def.nar.xz', 'nix-cache-bar'],
+    ]);
+
+    const result = await generateStaticSite({
+      narinfoDirPath: narinfoDir,
+      outputDir,
+      githubOwner: 'testowner',
+      githubRepo: 'testrepo',
+      githubReleaseTag: 'nix-cache',
+      narReleaseMap,
+    });
+
+    expect(result.narinfoCount).toBe(2);
+
+    const out1 = await fsp.readFile(path.join(outputDir, 'abc.narinfo'), 'utf8');
+    expect(out1).toContain('URL: https://github.com/testowner/testrepo/releases/download/nix-cache-foo/abc.nar.xz');
+
+    const out2 = await fsp.readFile(path.join(outputDir, 'def.narinfo'), 'utf8');
+    expect(out2).toContain('URL: https://github.com/testowner/testrepo/releases/download/nix-cache-bar/def.nar.xz');
+  });
+
+  test('falls back to githubReleaseTag when narReleaseMap is missing an entry', async () => {
+    const narinfo = 'StorePath: /nix/store/ghi-pkg\nNarHash: sha256:ghi\nNarSize: 300\nURL: nar/ghi.nar.xz\n';
+    await fsp.writeFile(path.join(narinfoDir, 'ghi.narinfo'), narinfo);
+
+    const narReleaseMap = new Map([
+      ['other.nar.xz', 'nix-cache-other'],
+    ]);
+
+    await generateStaticSite({
+      narinfoDirPath: narinfoDir,
+      outputDir,
+      githubOwner: 'testowner',
+      githubRepo: 'testrepo',
+      githubReleaseTag: 'nix-cache',
+      narReleaseMap,
+    });
+
+    const out = await fsp.readFile(path.join(outputDir, 'ghi.narinfo'), 'utf8');
+    expect(out).toContain('URL: https://github.com/testowner/testrepo/releases/download/nix-cache/ghi.nar.xz');
+  });
+
+  test('_redirects uses default githubReleaseTag even with narReleaseMap', async () => {
+    const narinfo = 'StorePath: /nix/store/abc-pkg\nNarHash: sha256:abc\nNarSize: 100\nURL: nar/abc.nar.xz\n';
+    await fsp.writeFile(path.join(narinfoDir, 'abc.narinfo'), narinfo);
+
+    const narReleaseMap = new Map([
+      ['abc.nar.xz', 'nix-cache-foo'],
+    ]);
+
+    await generateStaticSite({
+      narinfoDirPath: narinfoDir,
+      outputDir,
+      githubOwner: 'myorg',
+      githubRepo: 'myproject',
+      githubReleaseTag: 'cache-v2',
+      narReleaseMap,
+    });
+
+    const redirects = await fsp.readFile(path.join(outputDir, '_redirects'), 'utf8');
+    expect(redirects).toContain('https://github.com/myorg/myproject/releases/download/cache-v2/:filename');
+  });
 });

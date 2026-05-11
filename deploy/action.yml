@@ -37,6 +37,9 @@ inputs:
     description: "GitHub release tag for NAR storage"
     required: false
     default: "nix-cache"
+  github-release-tags:
+    description: "Comma-separated list of GitHub release tags to aggregate into the static site. When set, overrides github-release-tag for static generation."
+    required: false
   signing-key:
     description: "Nix signing key (keyname:base64-ed25519-private)"
     required: false
@@ -303,6 +306,7 @@ runs:
         GITHUB_OWNER: ${{ inputs.github-owner }}
         GITHUB_REPO: ${{ inputs.github-repo }}
         GITHUB_RELEASE_TAG: ${{ inputs.github-release-tag }}
+        GITHUB_RELEASE_TAGS: ${{ inputs.github-release-tags }}
         GITHUB_TOKEN: ${{ inputs.github-token }}
         OUTPUT_DIR: ${{ inputs.static }}
         STATIC_NIX_CACHE_DIR: ${{ steps.install.outputs.static-nix-cache-dir }}

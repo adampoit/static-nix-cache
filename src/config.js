@@ -30,6 +30,9 @@ module.exports = {
     owner: process.env.GITHUB_OWNER || '',
     repo: process.env.GITHUB_REPO || '',
     releaseTag: process.env.GITHUB_RELEASE_TAG || 'nix-cache',
+    releaseTags: process.env.GITHUB_RELEASE_TAGS
+      ? process.env.GITHUB_RELEASE_TAGS.split(',').map(t => t.trim()).filter(Boolean)
+      : [],
     pruneRetentionDays: parseInt(process.env.GITHUB_PRUNE_RETENTION_DAYS || '0', 10),
   },
 
