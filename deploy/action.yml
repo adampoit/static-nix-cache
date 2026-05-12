@@ -100,9 +100,12 @@ runs:
         # ── Helper: resolve store paths ───────────────────────────────────────────
         resolve_paths() {
           local out_file="/tmp/static-nix-cache-deploy-paths.txt"
+          local agg_dir="${1:-}"
 
           if [ -n "$INPUT_PATHS_FILE" ] && [ -f "$INPUT_PATHS_FILE" ]; then
             cp "$INPUT_PATHS_FILE" "$out_file"
+          elif [ -n "$agg_dir" ] && [ -f "$agg_dir/store-paths.txt" ] && [ -s "$agg_dir/store-paths.txt" ]; then
+            cp "$agg_dir/store-paths.txt" "$out_file"
           elif [ -n "$SNAPSHOT_PATH" ] && [ -f "$SNAPSHOT_PATH" ]; then
             echo "Auto-detecting new store paths..."
             local current_paths=$(mktemp)
@@ -223,7 +226,7 @@ runs:
             agg_dir="/tmp/static-nix-cache-aggregate-${suffix}"
             aggregate_one "$artifact_dir" "$agg_dir"
 
-            paths_file=$(resolve_paths)
+            paths_file=$(resolve_paths "$agg_dir")
             server_pid=$(start_server "$tag")
             push_paths "$paths_file" "$agg_dir/nix-cache"
             kill "$server_pid" 2>/dev/null || true
