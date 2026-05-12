@@ -155,7 +155,7 @@ runs:
           fi
 
           local count=$(wc -l < "$out_file")
-          echo "Will deploy $count store path(s)"
+          echo "Will deploy $count store path(s)" >&2
           echo "$out_file"
         }
 
